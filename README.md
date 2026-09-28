@@ -1,7 +1,7 @@
 # lm-systems
 
 Systems for training a language model from scratch: ring all-reduce, data-parallel
-training, communication benchmarks, and attention memory/time benchmarks. Companion to [lm-from-scratch](https://github.com/xueweiphy/lm-from-scratch),
+training, communication benchmarks, attention memory/time benchmarks, and FlashAttention-2. Companion to [lm-from-scratch](https://github.com/xueweiphy/lm-from-scratch),
 which holds the model; this repo holds the systems needed to train it at scale.
 Follows CS336 Assignment 2 (sections 4 and 5).
 
@@ -11,6 +11,7 @@ Follows CS336 Assignment 2 (sections 4 and 5).
 |---|---|
 | `allreduce/` | ring all-reduce in numpy — scatter-reduce then all-gather, 2(N-1) steps — with tests against a naive sum |
 | `ddp/` | `comm_benchmark.py`: times `dist.all_reduce` over message size and world size. `naive_ddp.py`: a minimal `DDP` wrapper — broadcast parameters from rank 0, all-reduce gradients after `backward()` — verified against single-process training |
+| `flash/` | FlashAttention-2: `flash_attention.py` — tiled forward in PyTorch (online softmax, saves only the log-sum-exp L) and the recomputation backward (`torch.compile`); `flash_attention_triton.py` — the forward as a Triton kernel with causal masking; `test_flash.py` — forward and gradients against PyTorch's SDPA |
 | `attention/` | `bench_attention.py`: forward/backward time and memory of naive causal attention (own softmax, single head, batch 8) over sequence length and head dimension |
 | `results/` | benchmark data and plots |
 
@@ -52,6 +53,24 @@ the elementwise T² operations, limited by memory bandwidth, dominate the matmul
 results are the case for FlashAttention: save only Q, K, V and the per-row log-sum-exp,
 recompute by tiles in backward, never materialise the T×T matrix.
 
+## FlashAttention-2
+
+Forward: one Triton program per (query tile, batch element) loops over key tiles,
+keeping a running max m, sum l and unnormalised output O on chip in fp32, rescaling both
+by exp(m_old − m_new) when the max moves, and dividing by l once at the end. Nothing of
+size T × T is written to memory; only O and L = m + log l are saved. Causal masking uses
+absolute positions and stops the key loop at the diagonal.
+
+Backward: recompute P = exp(S − L) from the saved L and use D = rowsum(O ∘ dO), which
+equals rowsum(P ∘ dP) — so no softmax Jacobian and no stored T × T activations.
+Written in PyTorch and compiled with `torch.compile`, shared by both versions.
+
+Correctness on an A100 MIG slice: forward within 2e-3 of SDPA in fp32 (the gap is
+Triton's TF32 matmul; 5e-7 with IEEE fp32), one bf16 ulp (7.8e-3) in bf16; gradients
+within 1–3e-3, causal or not. Passes the CS336 A2 FlashAttention tests (forward and
+backward, PyTorch and Triton, causal and not). Benchmarks against naive, compiled and
+SDPA attention to follow.
+
 ## Run
 
 ```
@@ -59,6 +78,7 @@ pytest allreduce/                    # ring all-reduce correctness
 python ddp/comm_benchmark.py         # writes allreduce.csv to the current directory
 python ddp/naive_ddp.py              # 4-process DDP; all ranks print identical weights
 python attention/bench_attention.py  # needs a CUDA GPU; writes pytorch_attention.csv
+pytest flash/                        # FlashAttention-2 vs SDPA; Triton tests need a CUDA GPU
 ```
 
 The all-reduce and DDP parts are CPU only (gloo backend); the attention benchmark needs a GPU.
