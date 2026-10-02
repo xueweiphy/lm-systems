@@ -119,12 +119,13 @@ def flash_fwd_kernel(
     tl.store ( L_block_ptr , Li, boundary_check = (0,) )
 
 class FlashForwardTriton (torch.autograd.Function):
+    Bq = 16
+    Bk = 16
 
     @staticmethod
     def forward ( ctx, Q, K, V,  is_causal = False ) :
-        # hard coded
-        Bq = 16
-        Bk = 16
+        Bq = FlashForwardTriton.Bq
+        Bk = FlashForwardTriton.Bk
 
         ctx.is_causal = is_causal
 

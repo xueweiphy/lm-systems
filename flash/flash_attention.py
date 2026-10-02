@@ -4,6 +4,8 @@ import torch
 
 
 def flash_bwd ( Q, K, V, O, dO, L, is_causal ) :
+    dtype = Q.dtype
+    Q, K, V, O, dO = ( t.float () for t in ( Q, K, V, O, dO ) )
     T, dk = K.shape [-2:]
     S = Q@ torch.transpose ( K, -2,-1 ) * dk**-0.5
     if is_causal :
@@ -21,7 +23,7 @@ def flash_bwd ( Q, K, V, O, dO, L, is_causal ) :
     dQ = dS @ K  * dk**-0.5
     dK = torch.transpose ( dS, -2, -1) @ Q * dk**-0.5
 
-    return dQ, dK, dV
+    return dQ.to ( dtype ), dK.to ( dtype ), dV.to ( dtype )
 # on a Mac without a working torch.compile, use:  flash_bwd_c = flash_bwd
 flash_bwd_c = torch.compile ( flash_bwd )
 
