@@ -70,9 +70,10 @@ Triton's TF32 matmul; 5e-7 with IEEE fp32), one bf16 ulp (7.8e-3) in bf16; gradi
 within 1–3e-3, causal or not. Passes the CS336 A2 FlashAttention tests (forward and
 backward, PyTorch and Triton, causal and not).
 
-Benchmark (`bench_flash.py`, `results/flash_a100mig.csv`): causal attention, B = 1,
-T = 128 … 65536, d = 16 … 128, bf16 and fp32, timed with `triton.testing.do_bench`
-on an A100 MIG 2g.10gb slice. At T = 16384, d = 64, bf16 (ms):
+Benchmark (`bench_flash.py`; `results/flash_a100mig.csv`, `results/flash_rtx6000.csv`):
+causal attention, B = 1, T = 128 … 65536, d = 16 … 128, bf16 and fp32, tile sizes
+16/32/64/128, timed with `triton.testing.do_bench`. On an A100 MIG 2g.10gb slice at
+T = 16384, d = 64, bf16, tile 16 (ms):
 
 | | fwd | bwd | fwd+bwd |
 |---|---|---|---|
@@ -86,7 +87,23 @@ key tiles); SDPA is still 4× faster, with larger tiles and a fused backward. Th
 backward here is untiled PyTorch that upcasts to fp32 and rebuilds the full T × T
 matrices, so it costs about what compiled naive costs in fp32 and runs out of memory
 at T = 32768 on the 10 GB slice; naive fp32 already fails at 16384. Times scale as T².
-Tile sizes 16/32/64/128 and a full-GPU run (RTX Pro 6000) are in progress.
+
+Tile size, on a full RTX Pro 6000 (96 GB, Blackwell), forward in bf16 (ms):
+
+| T, d | tile 16 | tile 32 | tile 64 | tile 128 | compiled | SDPA |
+|---|---|---|---|---|---|---|
+| 16384, 64 | 0.68 | 0.38 | 0.33 | 0.95 | 1.97 | 0.16 |
+| 65536, 64 | 7.34 | 3.75 | 2.47 | 6.97 | 34.15 | 2.12 |
+| 65536, 128 | 10.74 | 5.77 | 5.33 | — | 34.39 | 4.19 |
+
+Doubling the tile from 16 to 32 to 64 gives about 2× then 1.4×: each query tile loads
+K and V fewer times and `tl.dot` fills the tensor cores better. Tile 128 is slower
+again where it fits (the 128 × 128 fp32 accumulator leaves too few registers for other
+programs on the SM) and does not fit at all for d = 128 (bf16) or d ≥ 64 (fp32): Triton
+reports the shared-memory need, 181–328 KB against the 101 KB available. With tile 64
+the forward is within 15–30 % of SDPA at large T. The backward is tile-independent and
+10–30× slower than SDPA's fused one; with 96 GB it runs to T = 65536, where naive and
+compiled fp32 run out of memory (16 GB per T × T tensor).
 
 ## Run
 
