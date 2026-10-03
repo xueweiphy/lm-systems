@@ -11,7 +11,7 @@ Follows CS336 Assignment 2 (sections 4 and 5).
 |---|---|
 | `allreduce/` | ring all-reduce in numpy — scatter-reduce then all-gather, 2(N-1) steps — with tests against a naive sum |
 | `ddp/` | `comm_benchmark.py`: times `dist.all_reduce` over message size and world size. `naive_ddp.py`: a minimal `DDP` wrapper — broadcast parameters from rank 0, all-reduce gradients after `backward()` — verified against single-process training |
-| `flash/` | FlashAttention-2: `flash_attention.py` — tiled forward in PyTorch (online softmax, saves only the log-sum-exp L) and the recomputation backward (`torch.compile`); `flash_attention_triton.py` — the forward as a Triton kernel with causal masking; `test_flash.py` — forward and gradients against PyTorch's SDPA; `bench_flash.py` — fwd/bwd timing vs naive, compiled and SDPA over T, d, dtype and tile size |
+| `flash/` | FlashAttention-2: `flash_attention.py` — tiled forward in PyTorch (online softmax, saves only the log-sum-exp L) and the recomputation backward (`torch.compile`); `flash_attention_triton.py` — the forward as a Triton kernel with causal masking; `test_flash.py` — forward and gradients against PyTorch's SDPA; `bench_flash.py` — fwd/bwd timing vs naive, compiled and SDPA over T, d, dtype and tile size; `roofline.py` — the measured forwards on the RTX Pro 6000 roofline |
 | `attention/` | `bench_attention.py`: forward/backward time and memory of naive causal attention (own softmax, single head, batch 8) over sequence length and head dimension |
 | `results/` | benchmark data and plots |
 
@@ -105,6 +105,21 @@ the forward is within 15–30 % of SDPA at large T. The backward is tile-indepen
 10–30× slower than SDPA's fused one; with 96 GB it runs to T = 65536, where naive and
 compiled fp32 run out of memory (16 GB per T × T tensor).
 
+Roofline (`roofline.py`, `results/roofline_rtx6000.png`): measured on the card,
+1.46 TB/s (clone of 4 GiB) and 408 TFLOP/s dense bf16 (8192² matmul; datasheet 1.6 TB/s,
+500 TFLOP/s), ridge 280 FLOP/byte. Intensity from the operation counts: naive 4T²d FLOPs
+over ~10 T×T round trips, I = 0.4 d/b; compiled the same FLOPs over ~5 round trips after
+fusion; the tiled kernels 2T²d (causal skip) over the DRAM floor 4Tdb, I = T/2b.
+
+![roofline](results/roofline_rtx6000.png)
+
+Naive sits on the bandwidth slope at 53 % of it, independent of T; compiled touches the
+slope at d = 128 but, at 4× naive's intensity, is still far left of the ridge — fusion
+cannot reach the tensor-core ceiling. The tiled kernels are right of the ridge under the
+flat roof and climb with T: at T = 4096 a grid of 64 programs cannot fill 188 SMs
+(3–15 % of peak); at T = 65536 this Triton forward reaches 55 % of the bf16 peak
+(223 TFLOP/s) and SDPA 64 % (262).
+
 ## Run
 
 ```
@@ -114,6 +129,7 @@ python ddp/naive_ddp.py              # 4-process DDP; all ranks print identical 
 python attention/bench_attention.py  # needs a CUDA GPU; writes pytorch_attention.csv
 pytest flash/                        # FlashAttention-2 vs SDPA; Triton tests need a CUDA GPU
 python -m flash.bench_flash          # needs a CUDA GPU; writes flash_benchmark.csv
+python flash/roofline.py             # CPU only; roofline plot from results/flash_rtx6000.csv
 ```
 
 The all-reduce and DDP parts are CPU only (gloo backend); the attention benchmark needs a GPU.
