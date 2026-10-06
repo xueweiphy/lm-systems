@@ -1,9 +1,28 @@
 # lm-systems
 
-Systems for training a language model from scratch: ring all-reduce, data-parallel
-training, communication benchmarks, attention memory/time benchmarks, and FlashAttention-2. Companion to [lm-from-scratch](https://github.com/xueweiphy/lm-from-scratch),
-which holds the model; this repo holds the systems needed to train it at scale.
-Follows CS336 Assignment 2 (sections 4 and 5).
+FlashAttention-2 written from scratch — tiled forward in PyTorch and as a Triton kernel,
+recomputation backward — benchmarked against naive, compiled and PyTorch's SDPA on an A100
+MIG slice and an RTX Pro 6000, with a tile-size sweep and a measured roofline. Plus ring
+all-reduce, a minimal DDP wrapper and communication benchmarks. Companion to
+[lm-from-scratch](https://github.com/xueweiphy/lm-from-scratch), which holds the model;
+this repo holds the systems needed to train it at scale. Follows CS336 Assignment 2
+(sections 4 and 5).
+
+## Headline
+
+- **Triton forward, RTX Pro 6000, bf16, tile 64:** within **15–30 % of SDPA** at large T
+  (T = 65536, d = 64: 2.47 ms vs 2.12 ms); **55 % of the card's measured bf16 peak**
+  (223 TFLOP/s) against SDPA's 64 % — see the [roofline](#flashattention-2).
+- **A100 MIG slice, T = 16384:** forward **8× naive PyTorch and 3.4× `torch.compile`**;
+  SDPA still 4× faster there, mostly from its larger tiles and fused backward.
+- **Backward** is a recomputation backward in compiled PyTorch, not a fused kernel: correct
+  (gradients within 1–3e-3 of SDPA, passes the CS336 A2 tests) but **10–30× slower than
+  SDPA's** — the known gap and the next piece of work.
+- **Why naive attention loses**, measured: forward + backward peaks at ~6·B·T²·4 bytes
+  (4193 MiB predicted vs 4192 measured at T = 8192) and sits on the bandwidth roof at
+  53 % of it, independent of T — the T² elementwise traffic, not the matmuls, is the cost.
+
+Everything below is reproducible with the commands under [Run](#run); raw numbers are in `results/`.
 
 ## What's here
 
